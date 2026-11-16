@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>潮位短报文采集</title>
+<title>潮位短报文采集与基准核验</title>
 <style>
   :root { --fg:#1b2733; --muted:#5b6b7a; --line:#d8e0e8; --ok:#0a7d3b; --warn:#b3541e; --bad:#b00020; --bg:#f4f7fa; }
   * { box-sizing: border-box; }
@@ -11,7 +11,7 @@
   header { background:#0e3a5d; color:#fff; padding:14px 22px; }
   header h1 { margin:0; font-size:18px; }
   header p { margin:2px 0 0; font-size:12px; opacity:.8; }
-  main { max-width:1100px; margin:0 auto; padding:18px; }
+  main { max-width:1180px; margin:0 auto; padding:18px; }
   section { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px 18px; margin-bottom:16px; }
   h2 { margin:0 0 10px; font-size:15px; }
   table { border-collapse:collapse; width:100%; font-size:13px; }
@@ -24,18 +24,24 @@
   .tag.published { background:#e2f4e8; color:var(--ok); }
   .tag.collecting { background:#fdf3e0; color:var(--warn); }
   .tag.pending_review { background:#fde6e9; color:var(--bad); }
+  .tag.pass { background:#e2f4e8; color:var(--ok); }
+  .tag.out_of_tolerance { background:#fde6e9; color:var(--bad); }
+  .tag.missing_baseline { background:#fdf3e0; color:var(--warn); }
   .muted { color:var(--muted); }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  #upload-result { margin-top:10px; font-size:13px; white-space:pre-wrap; }
+  .result { margin-top:10px; font-size:13px; white-space:pre-wrap; }
   details { margin-top:8px; }
-  input[type=text], input[type=number] { padding:6px 8px; border:1px solid var(--line); border-radius:5px; }
+  input[type=text], input[type=number], select { padding:6px 8px; border:1px solid var(--line); border-radius:5px; }
   a.dl { color:#0e3a5d; }
+  code { background:#eef3f8; padding:0 4px; border-radius:3px; }
+  .summary { font-size:13px; margin:8px 0; }
+  .summary b { font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
 <header>
-  <h1>沿海潮位卫星短报文采集</h1>
-  <p>上传网关 NDJSON（拆段 / 乱序 / 重投）→ 按 站号+启动号+报文号 归组 → 组报校验 → 发布分钟潮位</p>
+  <h1>沿海潮位卫星短报文采集与基准核验</h1>
+  <p>上传网关 NDJSON → 组报校验 → 发布分钟潮位；上传站点小时基准 → 按站号与分钟核验 → 合格数据入监测库</p>
 </header>
 <main>
   <section>
@@ -45,7 +51,7 @@
       <button id="btn-upload">上传</button>
       <span class="muted">每行一条记录：station_id, boot_id, msg_id, seg_no, seg_total, payload_b64, sha256</span>
     </div>
-    <div id="upload-result"></div>
+    <div id="upload-result" class="result"></div>
   </section>
 
   <section>
@@ -60,11 +66,62 @@
   </section>
 
   <section>
-    <h2>3. 已确认观测</h2>
+    <h2>3. 上传站点小时基准</h2>
+    <div class="row">
+      <label>站号 <input type="number" id="base-station" placeholder="如 101" style="width:100px"></label>
+      <label>UTC 小时 <input type="text" id="base-hour" placeholder="2026-11-14T22:00:00Z" style="width:210px"></label>
+      <input type="file" id="base-file" accept=".csv,.txt">
+      <button id="btn-baseline">上传并替换该小时基准</button>
+    </div>
+    <div class="muted" style="margin-top:6px">
+      CSV 每行 <code>时间,基准潮位(m)</code>：时间可为 <code>YYYY-MM-DDTHH:MM:00Z</code> 或 <code>HH:MM</code>，
+      允许注释/空行/表头。每站每小时整小时替换；格式错误或保存失败时旧基准保持不变。
+    </div>
+    <div id="baseline-result" class="result"></div>
+    <details>
+      <summary class="muted">当前已上传的基准版本</summary>
+      <table style="margin-top:8px">
+        <thead><tr><th>站号</th><th>UTC 小时</th><th>分钟数</th><th>首分钟</th><th>末分钟</th><th>更新时间</th></tr></thead>
+        <tbody id="baseline-body"><tr><td colspan="6" class="muted">—</td></tr></tbody>
+      </table>
+    </details>
+  </section>
+
+  <section>
+    <h2>4. 基准核验结果（已确认观测 × 当前基准） <button class="ghost" id="btn-verify">刷新</button></h2>
+    <div class="row">
+      <label>站号 <input type="number" id="verify-station" placeholder="全部" style="width:90px"></label>
+      <label>UTC 小时 <input type="text" id="verify-hour" placeholder="全部" style="width:190px"></label>
+      <label>状态 <select id="verify-status">
+        <option value="">全部</option>
+        <option value="missing_baseline">缺基准</option>
+        <option value="out_of_tolerance">超差</option>
+        <option value="pass">合格</option>
+      </select></label>
+      <button class="ghost" id="btn-preview">查看</button>
+      <a class="dl" id="btn-download" href="/api/verification.csv" download>下载核验 CSV（合格）</a>
+      <a class="dl" id="btn-exceptions" href="/api/verification/exceptions.csv" download>下载异常明细 CSV</a>
+    </div>
+    <div class="muted" style="margin-top:6px">
+      与已提交观测实时对应：补段发布、迟到冲突撤下、复位后重采都会自动反映在此；
+      原始报文下载在下方，旧库观测无需重传。
+    </div>
+    <div class="summary" id="verify-summary">—</div>
+    <table>
+      <thead><tr>
+        <th>状态</th><th>站号</th><th>分钟 (UTC)</th><th>观测值 (m)</th><th>基准值 (m)</th>
+        <th>差值 (m)</th><th>来源报文</th><th>原报文行</th>
+      </tr></thead>
+      <tbody id="verify-body"><tr><td colspan="8" class="muted">—</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>5. 原始已确认观测</h2>
     <div class="row">
       <label>站号过滤 <input type="number" id="station-filter" placeholder="全部" style="width:90px"></label>
-      <button class="ghost" id="btn-preview">预览</button>
-      <a class="dl" id="btn-download" href="/api/observations.csv" download>下载 CSV</a>
+      <button class="ghost" id="btn-obs">预览</button>
+      <a class="dl" id="btn-obs-download" href="/api/observations.csv" download>下载原始观测 CSV</a>
       <span class="muted">仅包含组装并校验通过的完整报文；待核报文的观测已撤下</span>
     </div>
     <table style="margin-top:10px">
@@ -77,6 +134,7 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const STATUS_TEXT = {collecting:'收集中', published:'已发布', pending_review:'待核'};
+const VERIFY_TEXT = {pass:'合格', out_of_tolerance:'超差', missing_baseline:'缺基准'};
 
 $('btn-upload').onclick = async () => {
   const f = $('file').files[0];
@@ -93,7 +151,7 @@ $('btn-upload').onclick = async () => {
     const bad = data.results.filter(r => r.status === 'conflict' || r.status === 'error');
     if (bad.length) out += '\n' + bad.map(r => `  行${r.line}: [${r.status}] ${r.detail}`).join('\n');
     $('upload-result').textContent = out;
-    refreshMessages(); loadObservations();
+    refreshMessages(); loadVerification(); loadObservations();
   } catch (e) { $('upload-result').textContent = '上传出错: ' + e; }
 };
 
@@ -118,8 +176,81 @@ window.resetMsg = async (s, b, m) => {
   if (!confirm(`复位报文 站${s}/启动${b}/报文${m}？其段与观测将被删除，可重新采集。`)) return;
   const resp = await fetch(`/api/messages/${s}/${b}/${m}`, {method:'DELETE'});
   if (!resp.ok) alert('复位失败');
-  refreshMessages(); loadObservations();
+  refreshMessages(); loadVerification(); loadObservations();
 };
+
+$('btn-baseline').onclick = async () => {
+  const station = $('base-station').value.trim();
+  const hour = $('base-hour').value.trim();
+  const f = $('base-file').files[0];
+  if (!station || !hour) { $('baseline-result').textContent = '请填写站号与 UTC 小时'; return; }
+  if (!f) { $('baseline-result').textContent = '请选择基准 CSV 文件'; return; }
+  const fd = new FormData();
+  fd.append('station_id', station);
+  fd.append('hour', hour);
+  fd.append('file', f);
+  $('baseline-result').textContent = '上传中…';
+  try {
+    const resp = await fetch('/api/baselines', {method:'POST', body:fd});
+    const data = await resp.json();
+    if (!resp.ok) { $('baseline-result').textContent = '基准未更新，旧版保留: ' + (data.detail || resp.status); return; }
+    $('baseline-result').textContent =
+      `站 ${data.station_id} ${data.hour} 基准已整小时替换：${data.previous_rows} 行 → ${data.rows} 行`;
+    loadBaselines(); loadVerification();
+  } catch (e) { $('baseline-result').textContent = '上传出错: ' + e; }
+};
+
+async function loadBaselines() {
+  const resp = await fetch('/api/baselines');
+  const {baselines} = await resp.json();
+  const tb = $('baseline-body');
+  tb.innerHTML = baselines.length
+    ? baselines.map(b => `<tr><td>${b.station_id}</td><td>${esc(b.hour)}</td><td>${b.rows}</td>
+        <td>${esc(b.first_minute)}</td><td>${esc(b.last_minute)}</td><td>${esc(b.updated_at)}</td></tr>`).join('')
+    : '<tr><td colspan="6" class="muted">尚未上传基准</td></tr>';
+}
+
+function verifyParams() {
+  const p = new URLSearchParams();
+  const s = $('verify-station').value.trim();
+  const h = $('verify-hour').value.trim();
+  if (s !== '') p.set('station_id', s);
+  if (h !== '') p.set('hour', h);
+  return p;
+}
+
+async function loadVerification() {
+  const p = verifyParams();
+  let resp;
+  try { resp = await fetch('/api/verification?' + p.toString()); }
+  catch (e) { $('verify-summary').textContent = '核验结果加载失败: ' + e; return; }
+  const data = await resp.json();
+  if (!resp.ok) { $('verify-summary').textContent = '核验失败: ' + (data.detail || resp.status); return; }
+  const s = data.summary;
+  $('verify-summary').innerHTML =
+    `共核验 <b>${s.checked}</b> 分钟：合格 <b>${s.passed}</b>，缺基准 <b>${s.missing_baseline}</b>，` +
+    `超差 <b>${s.out_of_tolerance}</b>（阈值 |差值| ≤ ${data.tolerance_m} m）`;
+  const only = $('verify-status').value;
+  const rows = data.results.filter(r => !only || r.status === only);
+  const tb = $('verify-body');
+  tb.innerHTML = rows.length ? rows.map(r => {
+    const obs = r.observed_level_m;
+    const base = r.baseline_level_m;
+    const diff = r.diff_m;
+    return `<tr>
+      <td><span class="tag ${r.status}">${VERIFY_TEXT[r.status] || r.status}</span></td>
+      <td>${r.station_id}</td><td>${esc(r.observed_at)}</td>
+      <td>${obs}</td>
+      <td>${base === null ? '<span class="muted">—</span>' : base}</td>
+      <td>${diff === null ? '<span class="muted">—</span>' : diff}</td>
+      <td>启动${r.boot_id}/报文${r.msg_id}</td>
+      <td>${r.raw_line ? `<code>${esc(r.raw_line)}</code>` : '<span class="muted">—</span>'}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="8" class="muted">暂无核验数据</td></tr>';
+  const qs = p.toString();
+  $('btn-download').href = '/api/verification.csv' + (qs ? '?' + qs : '');
+  $('btn-exceptions').href = '/api/verification/exceptions.csv' + (qs ? '?' + qs : '');
+}
 
 function stationParam() {
   const v = $('station-filter').value.trim();
@@ -127,18 +258,22 @@ function stationParam() {
 }
 
 async function loadObservations() {
-  const resp = await fetch('/api/observations' + stationParam() + (stationParam() ? '&' : '?') + 'limit=50');
+  const sp = stationParam();
+  const resp = await fetch('/api/observations' + sp + (sp ? '&' : '?') + 'limit=50');
   const {observations} = await resp.json();
   const tb = $('obs-body');
   tb.innerHTML = observations.length
-    ? observations.map(o => `<tr><td>${o.station_id}</td><td>${o.observed_at}</td><td>${o.level_m}</td><td>启动${o.boot_id}/报文${o.msg_id}</td></tr>`).join('')
+    ? observations.map(o => `<tr><td>${o.station_id}</td><td>${esc(o.observed_at)}</td><td>${o.level_m}</td><td>启动${o.boot_id}/报文${o.msg_id}</td></tr>`).join('')
     : '<tr><td colspan="4" class="muted">暂无已确认观测</td></tr>';
-  $('btn-download').href = '/api/observations.csv' + stationParam();
+  $('btn-obs-download').href = '/api/observations.csv' + sp;
 }
 
 $('btn-refresh').onclick = refreshMessages;
-$('btn-preview').onclick = loadObservations;
-refreshMessages(); loadObservations();
+$('btn-verify').onclick = loadVerification;
+$('verify-status').onchange = loadVerification;
+$('btn-preview').onclick = loadVerification;
+$('btn-obs').onclick = loadObservations;
+refreshMessages(); loadBaselines(); loadVerification(); loadObservations();
 </script>
 </body>
 </html>

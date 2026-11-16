@@ -13,6 +13,10 @@
       报文2004: 先完整发布，随后收到内容被篡改的同号段 -> 转待核并撤下观测
       报文2005: 同一报文出现两个不同的整报摘要
 
+  sample_baseline_101_2026-11-14T22.csv —— 站101 22时基准：多数与观测差 ≤0.10 m，
+      第 10、11 分钟故意超差，第 30–32 分钟故意缺失（网页分别显示“超差”“缺基准”）
+  sample_baseline_101_2026-11-15T01.csv —— 站101 01时基准：全部在 0.20 m 内
+
 用法: python3 samples/generate_samples.py
 """
 
@@ -82,6 +86,22 @@ def write_ndjson(name: str, records: list[dict]) -> None:
     print(f"wrote {path} ({len(records)} records)")
 
 
+def write_baseline(name: str, station: int, hour: datetime,
+                   offsets: dict[int, float], missing: set[int]) -> None:
+    """按“观测值 + 偏移”生成整小时基准，并省略指定分钟（演示缺基准）。"""
+    lines = [f"# station={station} baseline hour={hour.strftime('%Y-%m-%dT%H:00:00Z')}"]
+    for minute in range(60):
+        if minute in missing:
+            continue
+        t = hour + timedelta(minutes=minute)
+        level = round(tide_level(t) + offsets.get(minute, 0.05), 2)
+        lines.append(f"{t.strftime('%Y-%m-%dT%H:%M:00Z')},{level:.2f}")
+    path = os.path.join(OUT_DIR, name)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print(f"wrote {path} ({len(lines) - 1} data lines)")
+
+
 def main() -> None:
     rng = random.Random(20261115)
     day = datetime(2026, 11, 14, 22, 0, 0)
@@ -130,6 +150,13 @@ def main() -> None:
     out += [m2005[0], other]
 
     write_ndjson("sample_conflicts.ndjson", out)
+
+    # ---------- 基准样例（对应 sample_upload.ndjson 的 101 站报文） ----------
+    # 报文 1001 覆盖 22:00–22:59；报文 1002 覆盖次日 01:00–01:59。
+    write_baseline("sample_baseline_101_2026-11-14T22.csv", 101, day,
+                   offsets={10: 0.35, 11: -0.40}, missing={30, 31, 32})
+    write_baseline("sample_baseline_101_2026-11-15T01.csv", 101,
+                   day + timedelta(hours=3), offsets={}, missing=set())
 
 
 if __name__ == "__main__":

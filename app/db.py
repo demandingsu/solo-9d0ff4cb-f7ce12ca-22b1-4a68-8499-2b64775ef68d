@@ -47,6 +47,17 @@ CREATE TABLE IF NOT EXISTS observations (
 
 CREATE INDEX IF NOT EXISTS idx_obs_msg
     ON observations (station_id, boot_id, msg_id);
+
+-- 站点小时基准潮位：按 (站号, UTC 小时) 整小时替换。
+CREATE TABLE IF NOT EXISTS baselines (
+    station_id  INTEGER NOT NULL,
+    hour_start  TEXT    NOT NULL,  -- 整点，如 2026-11-15T08:00:00Z
+    observed_at TEXT    NOT NULL,  -- 基准所属分钟
+    level_m     REAL    NOT NULL,  -- 有限数值，米
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (station_id, observed_at)
+);
+
 """
 
 
