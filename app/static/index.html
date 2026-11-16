@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>潮位短报文采集</title>
+<style>
+  :root { --fg:#1b2733; --muted:#5b6b7a; --line:#d8e0e8; --ok:#0a7d3b; --warn:#b3541e; --bad:#b00020; --bg:#f4f7fa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI","Noto Sans SC",sans-serif; color:var(--fg); background:var(--bg); }
+  header { background:#0e3a5d; color:#fff; padding:14px 22px; }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:2px 0 0; font-size:12px; opacity:.8; }
+  main { max-width:1100px; margin:0 auto; padding:18px; }
+  section { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px 18px; margin-bottom:16px; }
+  h2 { margin:0 0 10px; font-size:15px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { border:1px solid var(--line); padding:5px 8px; text-align:left; vertical-align:top; }
+  th { background:#eef3f8; white-space:nowrap; }
+  button { background:#0e3a5d; color:#fff; border:0; border-radius:5px; padding:7px 14px; cursor:pointer; font-size:13px; }
+  button:hover { background:#15507e; }
+  button.ghost { background:#fff; color:#0e3a5d; border:1px solid #0e3a5d; padding:3px 10px; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; white-space:nowrap; }
+  .tag.published { background:#e2f4e8; color:var(--ok); }
+  .tag.collecting { background:#fdf3e0; color:var(--warn); }
+  .tag.pending_review { background:#fde6e9; color:var(--bad); }
+  .muted { color:var(--muted); }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #upload-result { margin-top:10px; font-size:13px; white-space:pre-wrap; }
+  details { margin-top:8px; }
+  input[type=text], input[type=number] { padding:6px 8px; border:1px solid var(--line); border-radius:5px; }
+  a.dl { color:#0e3a5d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>沿海潮位卫星短报文采集</h1>
+  <p>上传网关 NDJSON（拆段 / 乱序 / 重投）→ 按 站号+启动号+报文号 归组 → 组报校验 → 发布分钟潮位</p>
+</header>
+<main>
+  <section>
+    <h2>1. 上传 NDJSON 记录</h2>
+    <div class="row">
+      <input type="file" id="file" accept=".ndjson,.jsonl,.txt">
+      <button id="btn-upload">上传</button>
+      <span class="muted">每行一条记录：station_id, boot_id, msg_id, seg_no, seg_total, payload_b64, sha256</span>
+    </div>
+    <div id="upload-result"></div>
+  </section>
+
+  <section>
+    <h2>2. 报文状态（缺段与待核原因） <button class="ghost" id="btn-refresh">刷新</button></h2>
+    <table>
+      <thead><tr>
+        <th>站号</th><th>启动号</th><th>报文号</th><th>状态</th>
+        <th>已收/总段</th><th>缺段</th><th>观测数</th><th>待核原因</th><th>操作</th>
+      </tr></thead>
+      <tbody id="msg-body"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>3. 已确认观测</h2>
+    <div class="row">
+      <label>站号过滤 <input type="number" id="station-filter" placeholder="全部" style="width:90px"></label>
+      <button class="ghost" id="btn-preview">预览</button>
+      <a class="dl" id="btn-download" href="/api/observations.csv" download>下载 CSV</a>
+      <span class="muted">仅包含组装并校验通过的完整报文；待核报文的观测已撤下</span>
+    </div>
+    <table style="margin-top:10px">
+      <thead><tr><th>站号</th><th>观测时刻 (UTC)</th><th>潮位 (m)</th><th>来源报文</th></tr></thead>
+      <tbody id="obs-body"><tr><td colspan="4" class="muted">—</td></tr></tbody>
+    </table>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const STATUS_TEXT = {collecting:'收集中', published:'已发布', pending_review:'待核'};
+
+$('btn-upload').onclick = async () => {
+  const f = $('file').files[0];
+  if (!f) { $('upload-result').textContent = '请先选择 NDJSON 文件'; return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  $('upload-result').textContent = '上传中…';
+  try {
+    const resp = await fetch('/api/upload', {method:'POST', body:fd});
+    const data = await resp.json();
+    if (!resp.ok) { $('upload-result').textContent = '上传失败: ' + (data.detail || resp.status); return; }
+    const c = data.counts;
+    let out = `共 ${data.lines} 行 → 入库 ${c.stored||0}，发布 ${c.published||0}，重投忽略 ${c.duplicate||0}，冲突 ${c.conflict||0}，待核忽略 ${c.ignored||0}，错误 ${c.error||0}`;
+    const bad = data.results.filter(r => r.status === 'conflict' || r.status === 'error');
+    if (bad.length) out += '\n' + bad.map(r => `  行${r.line}: [${r.status}] ${r.detail}`).join('\n');
+    $('upload-result').textContent = out;
+    refreshMessages(); loadObservations();
+  } catch (e) { $('upload-result').textContent = '上传出错: ' + e; }
+};
+
+async function refreshMessages() {
+  const resp = await fetch('/api/messages');
+  const {messages} = await resp.json();
+  const tb = $('msg-body');
+  if (!messages.length) { tb.innerHTML = '<tr><td colspan="9" class="muted">暂无记录</td></tr>'; return; }
+  tb.innerHTML = messages.map(m => `<tr>
+    <td>${m.station_id}</td><td>${m.boot_id}</td><td>${m.msg_id}</td>
+    <td><span class="tag ${m.status}">${STATUS_TEXT[m.status] || m.status}</span></td>
+    <td>${m.received}/${m.seg_total}</td>
+    <td>${m.missing_segments.length ? esc(m.missing_segments.join(', ')) : '—'}</td>
+    <td>${m.observations}</td>
+    <td>${m.reason ? esc(m.reason) : '—'}</td>
+    <td>${m.status === 'pending_review'
+        ? `<button class="ghost" onclick="resetMsg(${m.station_id},${m.boot_id},${m.msg_id})">复位重采</button>` : ''}</td>
+  </tr>`).join('');
+}
+
+window.resetMsg = async (s, b, m) => {
+  if (!confirm(`复位报文 站${s}/启动${b}/报文${m}？其段与观测将被删除，可重新采集。`)) return;
+  const resp = await fetch(`/api/messages/${s}/${b}/${m}`, {method:'DELETE'});
+  if (!resp.ok) alert('复位失败');
+  refreshMessages(); loadObservations();
+};
+
+function stationParam() {
+  const v = $('station-filter').value.trim();
+  return v === '' ? '' : `?station_id=${encodeURIComponent(v)}`;
+}
+
+async function loadObservations() {
+  const resp = await fetch('/api/observations' + stationParam() + (stationParam() ? '&' : '?') + 'limit=50');
+  const {observations} = await resp.json();
+  const tb = $('obs-body');
+  tb.innerHTML = observations.length
+    ? observations.map(o => `<tr><td>${o.station_id}</td><td>${o.observed_at}</td><td>${o.level_m}</td><td>启动${o.boot_id}/报文${o.msg_id}</td></tr>`).join('')
+    : '<tr><td colspan="4" class="muted">暂无已确认观测</td></tr>';
+  $('btn-download').href = '/api/observations.csv' + stationParam();
+}
+
+$('btn-refresh').onclick = refreshMessages;
+$('btn-preview').onclick = loadObservations;
+refreshMessages(); loadObservations();
+</script>
+</body>
+</html>

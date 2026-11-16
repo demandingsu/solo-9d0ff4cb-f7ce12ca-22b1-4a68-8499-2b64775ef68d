@@ -1,0 +1,13 @@
+services:
+  tide:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DB_PATH: /data/tide.db
+    volumes:
+      - tide-data:/data
+    restart: unless-stopped
+
+volumes:
+  tide-data:
